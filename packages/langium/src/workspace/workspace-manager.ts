@@ -9,6 +9,7 @@ import { WorkspaceFolder } from 'vscode-languageserver';
 import { URI, Utils } from 'vscode-uri';
 import { ServiceRegistry } from '../service-registry';
 import { LangiumSharedServices } from '../services';
+import { ConfigurationProvider } from './configuration';
 import { DocumentBuilder } from './document-builder';
 import { LangiumDocument, LangiumDocuments } from './documents';
 import { FileSystemNode, FileSystemProvider } from './file-system-provider';
@@ -30,18 +31,23 @@ export interface WorkspaceManager {
 
 }
 
+interface WorkspaceManagerConf {
+    skipFolders: string
+}
 export class DefaultWorkspaceManager implements WorkspaceManager {
 
     protected readonly serviceRegistry: ServiceRegistry;
     protected readonly langiumDocuments: LangiumDocuments;
     protected readonly documentBuilder: DocumentBuilder;
     protected readonly fileSystemProvider: FileSystemProvider;
+    protected readonly configurationProvider: ConfigurationProvider;
 
     constructor(services: LangiumSharedServices) {
         this.serviceRegistry = services.ServiceRegistry;
         this.langiumDocuments = services.workspace.LangiumDocuments;
         this.documentBuilder = services.workspace.DocumentBuilder;
         this.fileSystemProvider = services.workspace.FileSystemProvider;
+        this.configurationProvider = services.workspace.ConfigurationProvider;
     }
 
     async initializeWorkspace(folders: WorkspaceFolder[]): Promise<void> {
@@ -53,9 +59,11 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
                 this.langiumDocuments.addDocument(document);
             }
         };
+
+        const excludedFolders: Set<string> = new Set(this.serviceRegistry.all.map(language => this.excludedFolders(language.LanguageMetaData.languageId)).flat());
         await Promise.all(
             folders.map(wf => this.getRootFolder(wf))
-                .map(async rf => this.traverseFolder(rf, fileExtensions, collector))
+                .map(async rf => this.traverseFolder(rf, fileExtensions, excludedFolders, collector))
         );
         await this.loadAdditionalDocuments(folders, collector);
         await this.documentBuilder.build(documents);
@@ -83,12 +91,12 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
      * Traverse the file system folder identified by the given URI and its subfolders. All
      * contained files that match the file extensions are added to the collector.
      */
-    protected async traverseFolder(folderPath: URI, fileExtensions: string[], collector: (document: LangiumDocument) => void): Promise<void> {
+    protected async traverseFolder(folderPath: URI, fileExtensions: string[], excludedFolders: Set<string>, collector: (document: LangiumDocument) => void): Promise<void> {
         const content = await this.fileSystemProvider.readDirectory(folderPath);
         for (const entry of content) {
-            if (this.includeEntry(entry, fileExtensions)) {
+            if (this.includeEntry(entry, fileExtensions, excludedFolders)) {
                 if (entry.isDirectory) {
-                    await this.traverseFolder(entry.uri, fileExtensions, collector);
+                    await this.traverseFolder(entry.uri, fileExtensions, excludedFolders, collector);
                 } else if (entry.isFile) {
                     const document = this.langiumDocuments.getOrCreateDocument(entry.uri);
                     collector(document);
@@ -98,15 +106,28 @@ export class DefaultWorkspaceManager implements WorkspaceManager {
     }
 
     /**
-     * Determine whether the given folder entry shall be included while indexing the workspace.
+     * @returns Folder names to be excluded from building/indexing
      */
-    protected includeEntry(entry: FileSystemNode, fileExtensions: string[]): boolean {
+    protected excludedFolders(languageId: string): string[] {
+        const configured = <WorkspaceManagerConf>this.configurationProvider.getConfiguration(languageId, 'build');
+        return configured ? configured?.skipFolders?.split(',').map(folder => folder.trim()) : ['node_modules', 'out'];
+    }
+
+    /**
+     * Determine whether the given path entry shall be included while indexing the workspace.
+     */
+    protected includeEntry(entry: FileSystemNode, fileExtensions: string[], excludes: Set<string>): boolean {
         const name = Utils.basename(entry.uri);
         if (name.startsWith('.')) {
             return false;
         }
         if (entry.isDirectory) {
-            return name !== 'node_modules' && name !== 'out';
+            for (const exclude of excludes) {
+                if(name === exclude) {
+                    return false;
+                }
+            }
+            return true;
         } else if (entry.isFile) {
             return fileExtensions.includes(path.extname(name));
         }

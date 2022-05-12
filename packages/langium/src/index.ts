@@ -42,3 +42,4 @@ export * from './workspace/document-builder';
 export * from './workspace/documents';
 export * from './workspace/index-manager';
 export * from './workspace/workspace-manager';
+export * from './workspace/configuration';

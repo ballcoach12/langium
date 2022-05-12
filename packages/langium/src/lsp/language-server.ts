@@ -5,8 +5,8 @@
  ******************************************************************************/
 
 import {
-    AbstractCancellationTokenSource, CancellationToken, Connection, FileChangeType, HandlerResult, InitializeResult,
-    LSPErrorCodes, RequestHandler, ResponseError, ServerRequestHandler, TextDocumentIdentifier, TextDocumentSyncKind
+    AbstractCancellationTokenSource, CancellationToken, Connection, DidChangeConfigurationNotification, FileChangeType, HandlerResult, InitializeResult,
+    LSPErrorCodes, RequestHandler, ResponseError, ServerRequestHandler, TextDocumentIdentifier, TextDocumentSyncKind, WorkspaceFolder
 } from 'vscode-languageserver';
 import { URI } from 'vscode-uri';
 import { LangiumServices, LangiumSharedServices } from '../services';
@@ -21,7 +21,11 @@ export function startLanguageServer(services: LangiumSharedServices): void {
         throw new Error('Starting a language server requires the languageServer.Connection service to be set.');
     }
 
+    let wsFolders: WorkspaceFolder[] | null;
+    let wsConfiguration = false;
     connection.onInitialize(async params => {
+        wsFolders = params.workspaceFolders;
+        wsConfiguration = params.capabilities.workspace?.configuration??false;
         const result: InitializeResult = {
             capabilities: {
                 workspace: {
@@ -46,17 +50,34 @@ export function startLanguageServer(services: LangiumSharedServices): void {
                     : undefined
             }
         };
-
+        return result;
+    });
+    connection.onInitialized(async () => {
+        connection.client.register(DidChangeConfigurationNotification.type, {
+            section: languages.map(lang => lang.LanguageMetaData.languageId)
+        });
         try {
-            if (params.workspaceFolders) {
-                await services.workspace.WorkspaceManager.initializeWorkspace(params.workspaceFolders);
+            if (wsConfiguration) {
+                languages.map(lang => lang.LanguageMetaData.languageId).forEach(async section => {
+                    // TODO consider sending one getConfiguration(sections[]) request
+                    const configs = await connection.workspace.getConfiguration(section);
+                    services.workspace.ConfigurationProvider.updateConfiguration(section, configs);
+                });
+                if (wsFolders) {
+                    await services.workspace.WorkspaceManager.initializeWorkspace(wsFolders);
+                }
             }
         } catch (err) {
             console.error(err);
         }
-        return result;
     });
-
+    connection.onDidChangeConfiguration(change => {
+        if (change.settings) {
+            Object.keys(change.settings).forEach(section => {
+                services.workspace.ConfigurationProvider.updateConfiguration(section, change.settings[section]);
+            });
+        }
+    });
     addDocumentsHandler(connection, services);
     addDiagnosticsHandler(connection, services);
     addCompletionHandler(connection, services);

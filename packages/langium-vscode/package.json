@@ -37,7 +37,17 @@
         "fileMatch": "langium-config.json",
         "url": "./data/langium-config-schema.json"
       }
-    ]
+    ],
+    "configuration": {
+      "title": "Langium",
+      "properties": {
+        "langium.build.skipFolder": {
+          "type": "string",
+          "default": "node_modules, out",
+          "description": "Specifies the folders to exclude from traversing during initial build. You will need to reload your extension afterwards."
+        }
+      }
+    }
   },
   "activationEvents": [
     "onLanguage:langium"

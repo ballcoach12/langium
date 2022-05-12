@@ -36,6 +36,7 @@ import type { DocumentValidator } from './validation/document-validator';
 import type { ValidationRegistry } from './validation/validation-registry';
 import type { AstNodeDescriptionProvider, ReferenceDescriptionProvider } from './workspace/ast-descriptions';
 import type { AstNodeLocator } from './workspace/ast-node-locator';
+import { ConfigurationProvider } from './workspace/configuration';
 import type { DocumentBuilder } from './workspace/document-builder';
 import type { LangiumDocumentFactory, LangiumDocuments, TextDocumentFactory } from './workspace/documents';
 import type { FileSystemProvider } from './workspace/file-system-provider';
@@ -137,6 +138,7 @@ export type LangiumDefaultSharedServices = {
         TextDocumentFactory: TextDocumentFactory
         WorkspaceManager: WorkspaceManager
         FileSystemProvider: FileSystemProvider
+        ConfigurationProvider: ConfigurationProvider
     }
 }
 
