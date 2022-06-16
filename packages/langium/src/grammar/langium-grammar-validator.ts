@@ -4,20 +4,22 @@
  * terms of the MIT License, which is available in the project root.
  ******************************************************************************/
 
-import path from 'path';
 import { DiagnosticTag } from 'vscode-languageserver-types';
 import { Utils } from 'vscode-uri';
+import { NamedAstNode } from '../references/naming';
 import { References } from '../references/references';
 import { LangiumServices } from '../services';
 import { AstNode, Reference } from '../syntax-tree';
 import { getContainerOfType, getDocument, streamAllContents } from '../utils/ast-util';
 import { MultiMap } from '../utils/collections';
 import { toDocumentSegment } from '../utils/cst-util';
-import { stream } from '../utils/stream';
+import { Stream, stream } from '../utils/stream';
+import { relativeURI } from '../utils/uri-utils';
 import { ValidationAcceptor, ValidationChecks, ValidationRegistry } from '../validation/validation-registry';
 import { LangiumDocument, LangiumDocuments } from '../workspace/documents';
 import * as ast from './generated/ast';
-import { findKeywordNode, findNameAssignment, getEntryRule, getTypeName, isDataTypeRule, resolveImport, resolveTransitiveImports, terminalRegex } from './grammar-util';
+import { isParserRule, isRuleCall } from './generated/ast';
+import { findKeywordNode, findNameAssignment, getEntryRule, getTypeName, isDataTypeRule, isOptional, resolveImport, resolveTransitiveImports, terminalRegex } from './grammar-util';
 import type { LangiumGrammarServices } from './langium-grammar-module';
 import { applyErrorToAssignment, collectAllInterfaces, InterfaceInfo, validateTypesConsistency } from './type-system/type-validator';
 
@@ -26,8 +28,12 @@ export class LangiumGrammarValidationRegistry extends ValidationRegistry {
         super(services);
         const validator = services.validation.LangiumGrammarValidator;
         const checks: ValidationChecks<ast.LangiumGrammarAstType> = {
+            Action: validator.checkActionTypeUnions,
             AbstractRule: validator.checkRuleName,
-            Assignment: validator.checkAssignmentWithFeatureName,
+            Assignment: [
+                validator.checkAssignmentWithFeatureName,
+                validator.checkAssignmentToFragmentRule
+            ],
             ParserRule: [
                 validator.checkParserRuleDataType,
                 validator.checkRuleParametersUsed
@@ -90,6 +96,7 @@ export namespace IssueCodes {
     export const InvalidInfers = 'invalid-infers';
     export const MissingInfer = 'missing-infer';
     export const SuperfluousInfer = 'superfluous-infer';
+    export const OptionalUnorderedGroup = 'optional-unordered-group';
 }
 
 export class LangiumGrammarValidator {
@@ -133,17 +140,19 @@ export class LangiumGrammarValidator {
      * Check whether any rule defined in this grammar is a duplicate of an already defined rule or an imported rule
      */
     checkUniqueRuleName(grammar: ast.Grammar, accept: ValidationAcceptor): void {
-        this.checkUniqueName(grammar, accept, (grammar: ast.Grammar) => grammar.rules, 'rule');
+        const extractor = (grammar: ast.Grammar) => stream(grammar.rules).filter(rule => !isEmptyRule(rule));
+        this.checkUniqueName(grammar, accept, extractor, 'rule');
     }
 
     /**
      * Check whether any type defined in this grammar is a duplicate of an already defined type or an imported type
      */
     checkUniqueTypeName(grammar: ast.Grammar, accept: ValidationAcceptor): void {
-        this.checkUniqueName(grammar, accept, (grammar: ast.Grammar) => (grammar.types as Array<{ name: string } & AstNode>).concat(grammar.interfaces), 'type');
+        const extractor = (grammar: ast.Grammar) => stream(grammar.types).concat(grammar.interfaces);
+        this.checkUniqueName(grammar, accept, extractor, 'type');
     }
 
-    private checkUniqueName(grammar: ast.Grammar, accept: ValidationAcceptor, extractor: (grammar: ast.Grammar) => Array<{ name: string } & AstNode>, uniqueObjName: string): void {
+    private checkUniqueName(grammar: ast.Grammar, accept: ValidationAcceptor, extractor: (grammar: ast.Grammar) => Stream<NamedAstNode>, uniqueObjName: string): void {
         const map = new MultiMap<string, { name: string } & AstNode>();
         extractor(grammar).forEach(e => map.add(e.name, e));
 
@@ -245,6 +254,9 @@ export class LangiumGrammarValidator {
             types.add(interfaceType.name);
         }
         for (const rule of grammar.rules.filter(ast.isParserRule)) {
+            if (isEmptyRule(rule)) {
+                continue;
+            }
             const isDataType = isDataTypeRule(rule);
             const isInfers = !rule.returnType && !rule.dataType;
             const ruleTypeName = getTypeName(rule);
@@ -380,7 +392,7 @@ export class LangiumGrammarValidator {
             const grammar = document.parseResult.value;
             // Only check if the rule is sourced from another document
             if (ast.isGrammar(grammar) && refDoc !== document && !importedDocuments.has(refDoc)) {
-                let relative = path.relative(Utils.dirname(document.uri).fsPath, refDoc.uri.fsPath);
+                let relative = relativeURI(Utils.dirname(document.uri), refDoc.uri);
                 if (relative.endsWith('.langium')) {
                     relative = relative.substring(0, relative.length - '.langium'.length);
                 }
@@ -410,10 +422,11 @@ export class LangiumGrammarValidator {
                 }
             });
         }
-        for (const action of streamAllContents(grammar).filter(ast.isAction)) {
-            if (ast.isType(action.type)) {
-                accept('error', 'Actions cannot create union types.', { node: action, property: 'type' });
-            }
+    }
+
+    checkActionTypeUnions(action: ast.Action, accept: ValidationAcceptor): void {
+        if (ast.isType(action.type)) {
+            accept('error', 'Actions cannot create union types.', { node: action, property: 'type' });
         }
     }
 
@@ -453,7 +466,7 @@ export class LangiumGrammarValidator {
             visited.add(interfaceName);
             const interfaceInfo = nameToInterfaceInfo.get(interfaceName);
             if (interfaceInfo) {
-                interfaceInfo.type.properties.forEach(propery => result.add(propery.name, interfaceInfo.node));
+                interfaceInfo.type.properties.forEach(property => result.add(property.name, interfaceInfo.node));
                 interfaceInfo.type.interfaceSuperTypes.forEach(superType => collectPropertyNamesForHierarchyInternal(superType));
             }
         }
@@ -486,7 +499,7 @@ export class LangiumGrammarValidator {
             visitedSet.add(entry.name);
         }
         for (const rule of grammar.rules) {
-            if (ast.isTerminalRule(rule) && rule.hidden) {
+            if (ast.isTerminalRule(rule) && rule.hidden || isEmptyRule(rule)) {
                 continue;
             }
             if (!visitedSet.has(rule.name)) {
@@ -510,7 +523,7 @@ export class LangiumGrammarValidator {
     }
 
     checkRuleName(rule: ast.AbstractRule, accept: ValidationAcceptor): void {
-        if (rule.name) {
+        if (rule.name && !isEmptyRule(rule)) {
             const firstChar = rule.name.substring(0, 1);
             if (firstChar.toUpperCase() !== firstChar) {
                 accept('warning', 'Rule name should start with an upper case letter.', { node: rule, property: 'name', code: IssueCodes.RuleNameUppercase });
@@ -529,7 +542,11 @@ export class LangiumGrammarValidator {
     }
 
     checkUnorderedGroup(unorderedGroup: ast.UnorderedGroup, accept: ValidationAcceptor): void {
-        accept('error', 'Unordered groups are currently not supported', { node: unorderedGroup });
+        unorderedGroup.elements.forEach((ele) => {
+            if (isOptional(ele.cardinality)) {
+                accept('error', 'Optional elements in Unordered groups are currently not supported', { node: ele, code: IssueCodes.OptionalUnorderedGroup });
+            }
+        });
     }
 
     checkRuleParametersUsed(rule: ast.ParserRule, accept: ValidationAcceptor): void {
@@ -548,12 +565,21 @@ export class LangiumGrammarValidator {
     }
 
     checkParserRuleDataType(rule: ast.ParserRule, accept: ValidationAcceptor): void {
+        if (isEmptyRule(rule)) {
+            return;
+        }
         const hasDatatypeReturnType = rule.dataType;
         const isDataType = isDataTypeRule(rule);
         if (!hasDatatypeReturnType && isDataType) {
             accept('error', 'This parser rule does not create an object. Add a primitive return type or an action to the start of the rule to force object instantiation.', { node: rule, property: 'name' });
         } else if (hasDatatypeReturnType && !isDataType) {
             accept('error', 'Normal parser rules are not allowed to return a primitive value. Use a datatype rule for that.', { node: rule, property: 'dataType' });
+        }
+    }
+
+    checkAssignmentToFragmentRule(assignment: ast.Assignment, accept: ValidationAcceptor): void {
+        if (isRuleCall(assignment.terminal) && isParserRule(assignment.terminal.rule.ref) && assignment.terminal.rule.ref.fragment) {
+            accept('error', `Cannot use fragment rule '${assignment.terminal.rule.ref.name}' for assignment of property '${assignment.feature}'.`, { node: assignment, property: 'terminal' });
         }
     }
 
@@ -606,7 +632,7 @@ export class LangiumGrammarValidator {
 
     checkFragmentsInTypes(atomType: ast.AtomType, accept: ValidationAcceptor): void {
         if (ast.isParserRule(atomType.refType?.ref) && atomType.refType?.ref.fragment) {
-            accept('error', 'Cannot use rule fragments in types.', { node: atomType, property: 'refType'});
+            accept('error', 'Cannot use rule fragments in types.', { node: atomType, property: 'refType' });
         }
     }
 
@@ -621,7 +647,7 @@ export class LangiumGrammarValidator {
     }
 
     checkAssignmentWithFeatureName(assignment: ast.Assignment, accept: ValidationAcceptor): void {
-        if(assignment.feature === 'name' && ast.isCrossReference(assignment.terminal)) {
+        if (assignment.feature === 'name' && ast.isCrossReference(assignment.terminal)) {
             accept('warning', 'The "name" property is not recommended for cross-references.', { node: assignment, property: 'feature' });
         }
     }
@@ -631,4 +657,8 @@ const primitiveTypes = ['string', 'number', 'boolean', 'Date', 'bigint'];
 
 function isPrimitiveType(type: string): boolean {
     return primitiveTypes.includes(type);
+}
+
+function isEmptyRule(rule: ast.AbstractRule): boolean {
+    return !rule.definition || !rule.definition.$cstNode || rule.definition.$cstNode.length === 0;
 }

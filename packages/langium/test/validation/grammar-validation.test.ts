@@ -4,16 +4,17 @@
  * terms of the MIT License, which is available in the project root.
  ******************************************************************************/
 
-import { Diagnostic, DiagnosticSeverity } from 'vscode-languageserver';
-import { createLangiumGrammarServices, Grammar, LangiumDocument } from '../../src';
-import { parseHelper } from '../../src/test';
+import { createLangiumGrammarServices } from '../../src';
+import { Assignment, CrossReference, Grammar, Group, ParserRule } from '../../src/grammar/generated/ast';
+import { IssueCodes } from '../../src/grammar/langium-grammar-validator';
+import { expectError, expectNoIssues, expectWarning, validationHelper, ValidationResult } from '../../src/test';
 
 const services = createLangiumGrammarServices();
-const parser = parseHelper<Grammar>(services.grammar);
+const validate = validationHelper<Grammar>(services.grammar);
 
 describe('checkReferenceToRuleButNotType', () => {
 
-    const grammar = `
+    const input = `
         grammar CrossRefs
 
         entry Model:
@@ -30,20 +31,28 @@ describe('checkReferenceToRuleButNotType', () => {
         Reference infers RefType:
             ref=[Definition];
         terminal ID: /[_a-zA-Z][\\w_]*/;
-    `;
+    `.trim();
 
-    let validationData: ValidatorData;
+    let validationResult: ValidationResult<Grammar>;
 
     beforeAll(async () => {
-        validationData = await parseAndValidate(grammar);
+        validationResult = await validate(input);
     });
 
     test('CrossReference validation', () => {
-        expectError(validationData, "Use the rule type 'DefType' instead of the typed rule name 'Definition' for cross references.", 'Definition');
+        const rule = ((validationResult.document.parseResult.value.rules[3] as ParserRule).definition as Assignment).terminal as CrossReference;
+        expectError(validationResult, "Use the rule type 'DefType' instead of the typed rule name 'Definition' for cross references.", {
+            node: rule,
+            property: { name: 'type' }
+        });
     });
 
     test('AtomType validation', () => {
-        expectError(validationData, "Use the rule type 'RefType' instead of the typed rule name 'Reference' for cross references.", 'Reference');
+        const type = validationResult.document.parseResult.value.types[0];
+        expectError(validationResult, "Use the rule type 'RefType' instead of the typed rule name 'Reference' for cross references.", {
+            node: type,
+            property: { name: 'typeAlternatives' }
+        });
     });
 
 });
@@ -56,33 +65,38 @@ describe('Check Rule Fragment Validation', () => {
     terminal ID: /[_a-zA-Z][\\w_]*/;
     `.trim();
 
-    let validationData: ValidatorData;
+    let validationResult: ValidationResult<Grammar>;
 
     beforeAll(async () => {
-        validationData = await parseAndValidate(grammar);
+        validationResult = await validate(grammar);
     });
 
     test('Rule Fragment Validation', () => {
-        expectError(validationData, 'Cannot use rule fragments in types.', 'Fragment');
+        const fragmentType = validationResult.document.parseResult.value.types[0];
+        expectError(validationResult, 'Cannot use rule fragments in types.', { node: fragmentType, property: { name: 'typeAlternatives' } });
     });
 });
 
 describe('Checked Named CrossRefs', () => {
-    const grammar = `
+    const input = `
     grammar g
     A: 'a' name=ID;
     B: 'b' name=[A];
     terminal ID: /[_a-zA-Z][\\w_]*/;
     `.trim();
 
-    let validationData: ValidatorData;
+    let validationResult: ValidationResult<Grammar>;
 
     beforeAll(async () => {
-        validationData = await parseAndValidate(grammar);
+        validationResult = await validate(input);
     });
 
     test('Named crossReference warning', () => {
-        expectWarning(validationData, 'The "name" property is not recommended for cross-references.');
+        const rule = ((validationResult.document.parseResult.value.rules[1] as ParserRule).definition as Group).elements[1] as Assignment;
+        expectWarning(validationResult, 'The "name" property is not recommended for cross-references.', {
+            node: rule,
+            property: { name: 'feature' }
+        });
     });
 });
 
@@ -107,55 +121,39 @@ describe('Check grammar with primitives', () => {
     terminal DATE returns Date: /[0-9]{4}-{0-9}2-{0-9}2/+;
     `.trim();
 
-    let validationData: ValidatorData;
+    let validationResult: ValidationResult<Grammar>;
 
     // 1. build a parser from this grammar, verify it works
     beforeAll(async () => {
-        validationData = await parseAndValidate(grammar);
+        validationResult = await validate(grammar);
     });
 
     test('No validation errors in grammar', () => {
-        expect(validationData.diagnostics.filter(d => d.severity === DiagnosticSeverity.Error)).toHaveLength(0);
+        expectNoIssues(validationResult);
     });
 });
 
-interface ValidatorData {
-    document: LangiumDocument;
-    diagnostics: Diagnostic[];
-}
+describe('Grammar Validator tests', () => {
 
-async function parseAndValidate(grammar: string): Promise<ValidatorData> {
-    const doc = await parser(grammar);
-    const diagnostics = await services.grammar.validation.DocumentValidator.validateDocument(doc);
-    return {
-        document: doc,
-        diagnostics: diagnostics
-    };
-}
+    test('Unsupported optional element in unordered group error', async () => {
+        const text = `
+        grammar TestUnorderedGroup
+        
+        entry Book: 
+            'book' name=STRING 
+            (
+                  ("description" descr=STRING)
+                & ("edition" version=STRING)?
+                & ("author" author=STRING)
+            )
+        ;
+        hidden terminal WS: /\\s+/;
+        terminal STRING: /"[^"]*"|'[^']*'/;
+        `;
 
-function expecting(severity: DiagnosticSeverity) {
-    return function(data: ValidatorData, msg: string, at?: string): void {
-        const found: { msg?: string; at?: string } = {};
-        for (const diagnostic of data.diagnostics.filter(d => d.severity === severity)) {
-            if (diagnostic.message === msg) {
-                found.msg = diagnostic.message;
-                if (at) {
-                    const diagnosticMarkedText = data.document.textDocument.getText(diagnostic.range);
-                    found.at = diagnosticMarkedText;
-                    if (at === diagnosticMarkedText) {
-                        return;
-                    }
-                } else {
-                    return;
-                }
-            }
-        }
-        expect(found.msg).toBe(msg);
-        if (at) {
-            expect(found.at).toBe(at);
-        }
-    };
-}
-
-const expectError = expecting(DiagnosticSeverity.Error);
-const expectWarning = expecting(DiagnosticSeverity.Warning);
+        const validation = await validate(text);
+        expect(validation.diagnostics.length).toBe(1);
+        const range = { start: { character: 18, line: 7 }, end: { character: 45, line: 7 } };
+        expectError(validation, 'Optional elements in Unordered groups are currently not supported', { range, code: IssueCodes.OptionalUnorderedGroup } );
+    });
+});

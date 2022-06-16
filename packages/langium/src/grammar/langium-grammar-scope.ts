@@ -13,7 +13,7 @@ import { LangiumDocument, PrecomputedScopes } from '../workspace/documents';
 import { isReturnType } from './generated/ast';
 import { processActionNodeWithNodeDescriptionProvider, processTypeNodeWithNodeLocator } from './grammar-util';
 
-export class LangiumScopeProvider extends DefaultScopeProvider {
+export class LangiumGrammarScopeProvider extends DefaultScopeProvider {
     constructor(services: LangiumServices) {
         super(services);
     }
@@ -60,8 +60,8 @@ export class LangiumGrammarScopeComputation extends DefaultScopeComputation {
 
     constructor(services: LangiumServices) {
         super(services);
-        this.processTypeNode = processTypeNodeWithNodeLocator(services.index.AstNodeLocator);
-        this.processActionNode = processActionNodeWithNodeDescriptionProvider(services.index.AstNodeDescriptionProvider);
+        this.processTypeNode = processTypeNodeWithNodeLocator(services.workspace.AstNodeLocator);
+        this.processActionNode = processActionNodeWithNodeDescriptionProvider(services.workspace.AstNodeDescriptionProvider);
     }
 
     protected processNode(node: AstNode, document: LangiumDocument, scopes: PrecomputedScopes): void {
